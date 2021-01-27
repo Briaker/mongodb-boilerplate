@@ -1,0 +1,123 @@
+{
+	"database": "mongodb://localhost:27017/",
+	"port": 3002,
+	"bodyLimit": "100kb",
+	"corsHeaders": ["Link"],
+	"secret": "8charkey",
+	"tokenExpiry": "24h"
+}
+
+user model
+
+import mongoose from 'mongoose';
+
+const Schema = mongoose.Schema;
+
+const UserSchema = new Schema({
+    eid: {type: String, unique : true, required : true},
+    name: {type: String, required : true},
+    email: {type: String, required : true},
+    salt: {type: String, required : true},
+    roles: [{type : String, default: []}],
+    enabled: {type: Boolean, default : false}
+});
+
+export default mongoose.model('User', UserSchema);
+
+auth
+
+import User         from '../models/user';
+import jwt          from 'jsonwebtoken'; 
+
+const tokenAuth = {};
+
+tokenAuth.secret = {};
+tokenAuth.expiry = '24h';
+
+tokenAuth.authenticate = (req, res, next) => {
+    const saltedToken = req.body.token || req.query.token || req.headers['x-access-token'];
+    
+    if(req.method === 'OPTIONS') {
+        next();
+    }
+    else if(saltedToken) {
+        const token = saltedToken.slice(0,-8);
+        const salt = saltedToken.slice(-8);
+        jwt.verify(token, (tokenAuth.secret + salt), (err, decoded) => {
+            if(err) return res.json({err: 'Failed to authenticate token.'});
+            next();
+        });
+    }
+    else {
+        return res.status(403).send({ 
+            success: false, 
+            err: 'No valid credentials were provided' 
+        });
+    }
+};
+
+tokenAuth.issueToken = (req, res) => {
+    const eid = req.headers['auth-user'];
+    if (!eid) return res.json({errmsg: 'Authentication failed. User not provided.'});
+    User.findOne({eid}, (err, user) => {
+        if (err) return res.json({err});
+        if (!user) return res.json({errmsg: 'Authentication failed. User not found.'});
+        if (!user.enabled) return res.json({errmsg: 'Authentication failed. User is not enabled.'});
+        
+        const options = {}
+        if(!req.query.rtmapp) {
+            options.expiresIn = tokenAuth.expiry
+        }
+
+        const token = jwt.sign({}, (tokenAuth.secret + user.salt), options) + user.salt;
+
+        return res.json({token});
+    });
+};
+
+export default tokenAuth;
+
+perm
+
+import User         from '../models/user';
+
+const permissions = (methods=[], roles=[], allowedUsers=[], blockedUsers=[]) => {
+    const apiMethods = ['GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE'];
+    return (req, res, next) => {
+        if (methods.includes(req.method)) {
+            const employeeId = req.headers["auth-user"];
+            User
+            .findOne({eid: employeeId})
+            .exec((err, user) => {
+                if (err || !user) return res.status(403).send({ 
+                    success: false, 
+                    err: `User "${employeeId}" does not exists or could not be found, therefore does not have permission to use this method "${req.method}"` 
+                });
+                
+                const hasRole = () => {return user.roles.some((role) => {return roles.includes(role)})};
+                const hasAllowedUser = () => {return allowedUsers.includes(user.eid)};
+                const hasBlockedUser = () => {return blockedUsers.includes(user.eid)};
+                const currentUser = () => {return hasUser(CURRENT_USER) && req.params.name === CURRENT_USER};
+                
+                // check if the user can use this method on this endpoint
+                    // does one of the user's roles has match
+                    // is the user white listed               
+                    // does the logged in user's eid match the eid in the uri (only used for /users/:eid)
+                if(!hasBlockedUser() || hasRole() || hasAllowedUser() || currentUser()) {
+                    next(); // user has permission, continue
+                }
+                else {
+                    return res.status(403).send({ //user does not have permission, block request
+                        success: false, 
+                        err: `User "${user.name}" does not have permission to use this method "${req.method}"`
+                    });
+                }
+            });
+        }
+        else {
+            next(); // permission not needed, continue
+        }
+    };
+};
+
+export default permissions;
